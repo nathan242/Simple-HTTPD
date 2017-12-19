@@ -6,9 +6,11 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <magic.h>
 
 using namespace std;
 
@@ -17,6 +19,8 @@ int port = 80;
 string webroot (".");
 string index_page ("index.html");
 bool logging = false;
+
+magic_t magic;
 
 void help(char *argv);
 int server();
@@ -52,6 +56,9 @@ int main(int argc, char *argv[])
     cout << "HTTPD starting on port " << port << "." << endl;
     cout << "Webroot: " << webroot << endl;
 
+    magic = magic_open(MAGIC_MIME);
+    magic_load(magic, NULL);
+
     server();
 
     return 0;
@@ -72,7 +79,7 @@ int server()
     int sock;
     int conn;
     int sockopt = 1;
-    int pid;
+    pid_t pid;
     struct sockaddr_in serv_addr, cli_addr;
     socklen_t cli_len = sizeof(cli_addr);
 
@@ -100,6 +107,8 @@ int server()
             exit(0);
         } else {
             close(conn);
+            // Remove all dead children
+            while (waitpid(-1, NULL, WNOHANG) != 0) {}
         }
     }
 
@@ -130,6 +139,8 @@ int worker(int conn, char *client_address)
     ostringstream intconv;
     size_t readbytes;
     char filebuf[4096];
+
+    string file_mime;
 
     string location_string;
     string redirect_path;
@@ -209,6 +220,16 @@ int worker(int conn, char *client_address)
             
             // Try to open file
             if (file = fopen(filepath.c_str(), "r")) {
+                // Get file magic
+                file_mime = magic_file(magic, filepath.c_str());
+                intconv.str("");
+                intconv << "Content-Type: ";
+                if (file_mime.length() > 0) {
+                    intconv << file_mime << "\r\n";
+                } else {
+                    intconv << "text/html\r\n";
+                }
+                file_mime = intconv.str();
                 // Get file size
                 fseek(file, 0, SEEK_END);
                 filesize = ftell(file);
@@ -221,7 +242,7 @@ int worker(int conn, char *client_address)
                 write(conn, "HTTP/1.1 200 OK\r\n", 17);
                 write(conn, "Server: SIMPLE-HTTPD/0.01\r\n", 27);
                 write(conn, filesizestr.c_str(), filesizestr.length());
-                write(conn, "Content-Type: text/html\r\n", 25);
+                write(conn, file_mime.c_str(), file_mime.length());
                 write(conn, "\r\n", 2);
                 while (ftell(file) < filesize) {
                     readbytes = fread(filebuf,1,4096,file);
