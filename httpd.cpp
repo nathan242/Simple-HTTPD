@@ -10,29 +10,51 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <magic.h>
 
 using namespace std;
+
+//const string server_identity = "NPHTTPD/0.01";
+const string server_header = "Server: NPHTTPD/0.01\r\n";
 
 // Global variables
 int port = 80;
 string webroot (".");
 string index_page ("index.html");
+bool auto_index = false;
 bool logging = false;
 
 magic_t magic;
+
+struct reqparam {
+    string method;
+    string path;
+    string host;
+    string useragent;
+    string accept;
+};
+
+struct respparam {
+    int code;
+    string location;
+};
 
 void help(char *argv);
 int server();
 int worker(int conn, char *client_address);
 void check_redirect(string &filepath, string &path, string &redirect_path);
+bool file_exists(string &filepath);
+bool dir_exists(string &filepath);
+void http_response(int conn, respparam &response);
+void url_decode(string &path);
 
 int main(int argc, char *argv[])
 {
     int opt;
 
 
-    while ((opt = getopt(argc, argv, "hlp:r:i:")) != -1) {
+    while ((opt = getopt(argc, argv, "halp:r:i:")) != -1) {
         switch (opt) {
             case 'p':
                 port = atoi(optarg);
@@ -42,6 +64,9 @@ int main(int argc, char *argv[])
                 break;
             case 'i':
                 index_page.assign(optarg);
+                break;
+            case 'a':
+                auto_index = true;
                 break;
             case 'l':
                 logging = true;
@@ -67,10 +92,11 @@ int main(int argc, char *argv[])
 void help(char *argv)
 {
     cout << "Simple HTTP Daemon v0.01." << endl;
-    cout << "Usage: " << argv << " -p [TCP_PORT] -r [WEB_ROOT] -i [DEFAULT_INDEX] -l" << endl;
+    cout << "Usage: " << argv << " -p [TCP_PORT] -r [WEB_ROOT] -i [DEFAULT_INDEX] -a -l" << endl;
     cout << " -p [TCP_PORT] - TCP port to listen on. Default = 80." << endl;
     cout << " -r [WEB_ROOT] - Directory for web root. Default = current working directory." << endl;
     cout << " -i [DEFAULT_INDEX] - Default index file. Default = \"index.html\"." << endl;
+    cout << " -a - Use automatic directory index when default index is missing." << endl;
     cout << " -l - Enable logging to STDOUT." << endl;
 }
 
@@ -124,13 +150,8 @@ int worker(int conn, char *client_address)
     string param;
     string value;
 
-    struct reqparam {
-        string method;
-        string path;
-        string host;
-        string useragent;
-        string accept;
-    } request;
+    reqparam request;
+    respparam response;
 
     string filepath;
     FILE *file;
@@ -140,9 +161,14 @@ int worker(int conn, char *client_address)
     size_t readbytes;
     char filebuf[4096];
 
+    struct dirent *dp;
+    string auto_index_page;
+    #ifdef _DIRENT_HAVE_D_TYPE
+    bool idx_is_dir = false;
+    #endif
+
     string file_mime;
 
-    string location_string;
     string redirect_path;
 
 
@@ -172,6 +198,11 @@ int worker(int conn, char *client_address)
             parampos = line.find(" ");
             if (parampos == string::npos) {
                 // Invalid request
+                response.code = 501;
+                http_response(conn, response);
+                shutdown(conn, SHUT_RDWR);
+                close(conn);
+                return 0;
             }
             request.method.assign(line.substr(0, parampos));
             line.assign(line.substr(parampos+1));
@@ -180,6 +211,11 @@ int worker(int conn, char *client_address)
             parampos = line.find(" ");
             if (parampos == string::npos) {
                 // Invalid request
+                response.code = 501;
+                http_response(conn, response);
+                shutdown(conn, SHUT_RDWR);
+                close(conn);
+                return 0;
             }
             request.path.assign(line.substr(0, parampos));
 
@@ -207,6 +243,7 @@ int worker(int conn, char *client_address)
     // Respond to request
     if (request.method == "GET") {
         // Check the requested file
+        url_decode(request.path);
         filepath.assign(webroot);
         filepath.append(request.path);
         check_redirect(filepath, request.path, redirect_path);
@@ -217,69 +254,115 @@ int worker(int conn, char *client_address)
                 filepath.erase(parampos, 1);
                 parampos = filepath.find("../");
             }
+
+            // If no file specified, load the page index
+            if (filepath.compare(filepath.length()-1, 1, "/") == 0) {
+                if (dir_exists(filepath)) {
+                    filepath.append(index_page);
+                    if (auto_index) {
+                        if (!file_exists(filepath)) {
+                            // Auto index
+                            parampos = filepath.rfind("/");
+                            filepath.erase(parampos+1, string::npos);
+
+                            DIR *dirp = opendir(filepath.c_str());
+                            auto_index_page.assign("<!doctype html>\r\n  <head>\r\n    <title>");
+                            auto_index_page.append(request.path);
+                            auto_index_page.append("</title>\r\n  </head>\r\n  <body>\r\n    <a href=\"..\">&lt;&lt;</a><h2>PATH: ");
+                            auto_index_page.append(request.path);
+                            auto_index_page.append("</h2>\r\n");
+                            while ((dp = readdir(dirp)) != NULL) {
+                                #ifdef _DIRENT_HAVE_D_TYPE
+                                idx_is_dir = false;
+                                #endif
+                                if (strcmp(dp->d_name, ".") != 0 && strcmp(dp->d_name, "..") != 0) {
+                                    auto_index_page.append("    <p><a href=\"");
+                                    auto_index_page.append(dp->d_name);
+                                    #ifdef _DIRENT_HAVE_D_TYPE
+                                    if (dp->d_type == DT_DIR) {
+                                        idx_is_dir = true;
+                                        auto_index_page.append("/");
+                                    }
+                                    #endif
+                                    auto_index_page.append("\">");
+                                    auto_index_page.append(dp->d_name);
+                                    #ifdef _DIRENT_HAVE_D_TYPE
+                                    if (idx_is_dir) {
+                                        auto_index_page.append("/");
+                                    }
+                                    #endif
+                                    auto_index_page.append("</a></p>\r\n");
+                                }
+                            }
+                            closedir(dirp);
+                            auto_index_page.append("  </body>\r\n</html>");
+
+                            intconv.str("");
+                            intconv << "Content-Length: " << auto_index_page.length() << "\r\n";
+                            filesizestr = intconv.str();
+
+                            // Write output response
+                            write(conn, "HTTP/1.1 200 OK\r\n", 17);
+                            write(conn, server_header.c_str(), server_header.length());
+                            write(conn, filesizestr.c_str(), filesizestr.length());
+                            write(conn, "Content-Type: text/html\r\n", 25);
+                            write(conn, "\r\n", 2);
+                            write(conn, auto_index_page.c_str(), auto_index_page.length());
+                        }
+                    }
+                }
+            }
             
-            // Try to open file
-            if (file = fopen(filepath.c_str(), "r")) {
-                // Get file magic
-                file_mime = magic_file(magic, filepath.c_str());
-                intconv.str("");
-                intconv << "Content-Type: ";
-                if (file_mime.length() > 0) {
-                    intconv << file_mime << "\r\n";
+            if (auto_index_page.length() == 0) {
+                // Try to open file
+                if (file_exists(filepath) && (file = fopen(filepath.c_str(), "r"))) {
+                    // Get file magic
+                    file_mime = magic_file(magic, filepath.c_str());
+                    intconv.str("");
+                    intconv << "Content-Type: ";
+                    if (file_mime.length() > 0) {
+                        intconv << file_mime << "\r\n";
+                    } else {
+                        intconv << "text/html\r\n";
+                    }
+                    file_mime = intconv.str();
+                    // Get file size
+                    fseek(file, 0, SEEK_END);
+                    filesize = ftell(file);
+                    rewind(file);
+                    intconv.str("");
+                    intconv << "Content-Length: " << filesize << "\r\n";
+                    filesizestr = intconv.str();
+
+                    // Write output response
+                    write(conn, "HTTP/1.1 200 OK\r\n", 17);
+                    write(conn, server_header.c_str(), server_header.length());
+                    write(conn, filesizestr.c_str(), filesizestr.length());
+                    write(conn, file_mime.c_str(), file_mime.length());
+                    write(conn, "\r\n", 2);
+                    while (ftell(file) < filesize) {
+                        readbytes = fread(filebuf,1,4096,file);
+                        write(conn, filebuf, readbytes);
+                    }
+
                 } else {
-                    intconv << "text/html\r\n";
+                    // 404
+                    response.code = 404;
+                    http_response(conn, response);
                 }
-                file_mime = intconv.str();
-                // Get file size
-                fseek(file, 0, SEEK_END);
-                filesize = ftell(file);
-                rewind(file);
-                intconv.str("");
-                intconv << "Content-Length: " << filesize << "\r\n";
-                filesizestr = intconv.str();
-
-                // Write output response
-                write(conn, "HTTP/1.1 200 OK\r\n", 17);
-                write(conn, "Server: SIMPLE-HTTPD/0.01\r\n", 27);
-                write(conn, filesizestr.c_str(), filesizestr.length());
-                write(conn, file_mime.c_str(), file_mime.length());
-                write(conn, "\r\n", 2);
-                while (ftell(file) < filesize) {
-                    readbytes = fread(filebuf,1,4096,file);
-                    write(conn, filebuf, readbytes);
-                }
-
-            } else {
-                // 404
-                write(conn, "HTTP/1.1 404 Not Found\r\n", 24);
-                write(conn, "Server: SIMPLE-HTTPD/0.01\r\n", 27);
-                write(conn, "Content-Length: 142\r\n", 21);
-                write(conn, "Content-Type: text/html\r\n", 25);
-                write(conn, "\r\n", 2);
-                write(conn, "<!doctype html>\r\n  <head>\r\n    <title>HTTP 404 - NOT FOUND</title>\r\n  </head>\r\n  <body>\r\n    <h1>HTTP 404 - NOT FOUND</h1>\r\n  </body>\r\n</html>", 142);
             }
         } else {
             // 301 Redirect
-            location_string.assign("Location: ");
-            location_string.append(redirect_path);
-            location_string.append("\r\n");
-            write(conn, "HTTP/1.1 301 Moved Permanently\r\n", 32);
-            write(conn, "Server: SIMPLE-HTTPD/0.01\r\n", 27);
-            write(conn, location_string.c_str(), location_string.length());
-            write(conn, "Content-Length: 158\r\n", 21);
-            write(conn, "Content-Type: text/html\r\n", 25);
-            write(conn, "\r\n", 2);
-            write(conn, "<!doctype html>\r\n  <head>\r\n    <title>HTTP 301 - MOVED PERMANENTLY</title>\r\n  </head>\r\n  <body>\r\n    <h1>HTTP 301 - MOVED PERMANENTLY</h1>\r\n  </body>\r\n</html>", 158);
+            response.code = 301;
+            response.location.assign("Location: ");
+            response.location.append(redirect_path);
+            response.location.append("\r\n");
+            http_response(conn, response);
         }
     } else {
-        // Invalid method
-        write(conn, "HTTP/1.1 501 Method Not Implemented\r\n", 37);
-        write(conn, "Server: SIMPLE-HTTPD/0.01\r\n", 27);
-        write(conn, "Allow: GET\r\n", 12);
-        write(conn, "Content-Length: 168\r\n", 21);
-        write(conn, "Content-Type: text/html\r\n", 25);
-        write(conn, "\r\n", 2);
-        write(conn, "<!doctype html>\r\n  <head>\r\n    <title>HTTP 501 - METHOD NOT IMPLEMENTED</title>\r\n  </head>\r\n  <body>\r\n    <h1>HTTP 501 - METHOD NOT IMPLEMENTED</h1>\r\n  </body>\r\n</html>", 168);
+        // 501 Invalid method
+        response.code = 501;
+        http_response(conn, response);
     }
 
     // End of request
@@ -299,15 +382,80 @@ void check_redirect(string &filepath, string &path, string &redirect_path)
     stat(filepath.c_str(), &path_stat);
 
     // Is it a directory?
-    if (S_ISDIR(path_stat.st_mode)) {
+    if (filepath.compare(filepath.length()-1, 1, "/") != 0 && S_ISDIR(path_stat.st_mode)) {
         redirect_path.assign(path);
-        // Does the path end with /?
-        if (path.compare(path.length()-1, 1, "/") != 0) {
-            redirect_path.append("/");
-        }
-        redirect_path.append(index_page);
+        redirect_path.append("/");
     }
 
     return;
 }
 
+bool file_exists(string &filepath)
+{
+    struct stat path_stat;
+    stat(filepath.c_str(), &path_stat);
+
+    // Is it a file?
+    if (S_ISREG(path_stat.st_mode)) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+bool dir_exists(string &filepath)
+{
+    struct stat path_stat;
+    stat(filepath.c_str(), &path_stat);
+
+    // Is it a file?
+    if (S_ISDIR(path_stat.st_mode)) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+void http_response(int conn, respparam &response)
+{
+    if (response.code == 404) {
+        write(conn, "HTTP/1.1 404 Not Found\r\n", 24);
+        write(conn, server_header.c_str(), server_header.length());
+        write(conn, "Content-Length: 142\r\n", 21);
+        write(conn, "Content-Type: text/html\r\n", 25);
+        write(conn, "\r\n", 2);
+        write(conn, "<!doctype html>\r\n  <head>\r\n    <title>HTTP 404 - NOT FOUND</title>\r\n  </head>\r\n  <body>\r\n    <h1>HTTP 404 - NOT FOUND</h1>\r\n  </body>\r\n</html>", 142);
+    } else if (response.code == 301) {
+        write(conn, "HTTP/1.1 301 Moved Permanently\r\n", 32);
+        write(conn, server_header.c_str(), server_header.length());
+        write(conn, response.location.c_str(), response.location.length());
+        write(conn, "Content-Length: 158\r\n", 21);
+        write(conn, "Content-Type: text/html\r\n", 25);
+        write(conn, "\r\n", 2);
+        write(conn, "<!doctype html>\r\n  <head>\r\n    <title>HTTP 301 - MOVED PERMANENTLY</title>\r\n  </head>\r\n  <body>\r\n    <h1>HTTP 301 - MOVED PERMANENTLY</h1>\r\n  </body>\r\n</html>", 158);
+    } else if (response.code == 501) {
+        write(conn, "HTTP/1.1 501 Method Not Implemented\r\n", 37);
+        write(conn, server_header.c_str(), server_header.length());
+        write(conn, "Allow: GET\r\n", 12);
+        write(conn, "Content-Length: 168\r\n", 21);
+        write(conn, "Content-Type: text/html\r\n", 25);
+        write(conn, "\r\n", 2);
+        write(conn, "<!doctype html>\r\n  <head>\r\n    <title>HTTP 501 - METHOD NOT IMPLEMENTED</title>\r\n  </head>\r\n  <body>\r\n    <h1>HTTP 501 - METHOD NOT IMPLEMENTED</h1>\r\n  </body>\r\n</html>", 168);
+    }
+
+    return;
+}
+
+void url_decode(string &path)
+{
+    int pos;
+
+    pos = path.find("%20");
+    while (pos != string::npos) {
+        path.erase(pos,2);
+        path.replace(pos, 1 , " ");
+        pos = path.find("%20");
+    }
+
+    return;
+}
