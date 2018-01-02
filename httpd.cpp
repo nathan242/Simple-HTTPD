@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <iostream>
 #include <sstream>
+#include <csignal>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -11,6 +12,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <dirent.h>
+#include <errno.h>
 #include <magic.h>
 
 using namespace std;
@@ -22,6 +24,7 @@ const string server_header = "Server: NPHTTPD/0.01\r\n";
 int port = 80;
 string webroot (".");
 string index_page ("index.html");
+string magic_db;
 bool auto_index = false;
 bool logging = false;
 
@@ -48,13 +51,15 @@ bool file_exists(string &filepath);
 bool dir_exists(string &filepath);
 void http_response(int conn, respparam &response);
 void url_decode(string &path);
+void exit_signal_handler(int signum);
 
 int main(int argc, char *argv[])
 {
     int opt;
+    int status = 0;
 
 
-    while ((opt = getopt(argc, argv, "halp:r:i:")) != -1) {
+    while ((opt = getopt(argc, argv, "halp:r:i:m:")) != -1) {
         switch (opt) {
             case 'p':
                 port = atoi(optarg);
@@ -64,6 +69,9 @@ int main(int argc, char *argv[])
                 break;
             case 'i':
                 index_page.assign(optarg);
+                break;
+            case 'm':
+                magic_db.assign(optarg);
                 break;
             case 'a':
                 auto_index = true;
@@ -78,11 +86,25 @@ int main(int argc, char *argv[])
         }
     }
 
-    cout << "HTTPD starting on port " << port << "." << endl;
-    cout << "Webroot: " << webroot << endl;
+    if (!dir_exists(webroot)) {
+        cerr << "Webroot does not exist or is not a directory!" << endl;
+        exit(2);
+    }
 
     magic = magic_open(MAGIC_MIME);
-    magic_load(magic, NULL);
+    if (magic_db.length() > 0) {
+        status = magic_load(magic, magic_db.c_str());
+    } else {
+        status = magic_load(magic, NULL);
+    }
+
+    if (status == -1) {
+        cerr << "Failed to load magic database!" << endl;
+        exit(2);
+    }
+
+    cout << "HTTPD starting on port " << port << "." << endl;
+    cout << "Webroot: " << webroot << endl;
 
     server();
 
@@ -92,16 +114,19 @@ int main(int argc, char *argv[])
 void help(char *argv)
 {
     cout << "Simple HTTP Daemon v0.01." << endl;
-    cout << "Usage: " << argv << " -p [TCP_PORT] -r [WEB_ROOT] -i [DEFAULT_INDEX] -a -l" << endl;
+    cout << "Usage: " << argv << " -p [TCP_PORT] -r [WEB_ROOT] -i [DEFAULT_INDEX] -m [MAGIC_DB] -a -l" << endl;
     cout << " -p [TCP_PORT] - TCP port to listen on. Default = 80." << endl;
     cout << " -r [WEB_ROOT] - Directory for web root. Default = current working directory." << endl;
     cout << " -i [DEFAULT_INDEX] - Default index file. Default = \"index.html\"." << endl;
+    cout << " -m [MAGIC_DB] - Path to alternate magic database." << endl;
     cout << " -a - Use automatic directory index when default index is missing." << endl;
     cout << " -l - Enable logging to STDOUT." << endl;
 }
 
 int server()
 {
+    int error = 0;
+
     int sock;
     int conn;
     int sockopt = 1;
@@ -110,14 +135,27 @@ int server()
     socklen_t cli_len = sizeof(cli_addr);
 
 
+    // Register signal handlers
+    signal(SIGINT, exit_signal_handler);
+    signal(SIGTERM, exit_signal_handler);
+
     // Create server socket
     sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == -1) { 
+        error = errno;
+        cerr << "Failed to create socket! Error: " << error << endl;
+        exit(2);
+    }
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &sockopt, sizeof(sockopt));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = INADDR_ANY;
     serv_addr.sin_port = htons(port);
 
-    bind(sock, (struct sockaddr *) &serv_addr, sizeof(serv_addr));
+    if (bind(sock, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) == -1) {
+        error = errno;
+        cerr << "Failed to bind to socket! Error: " << error << endl;
+        exit(2);
+    }
     listen(sock, 0);
 
     // Wait for connection and fork
@@ -408,7 +446,7 @@ bool dir_exists(string &filepath)
     struct stat path_stat;
     stat(filepath.c_str(), &path_stat);
 
-    // Is it a file?
+    // Is it a dir?
     if (S_ISDIR(path_stat.st_mode)) {
         return true;
     } else {
@@ -458,4 +496,11 @@ void url_decode(string &path)
     }
 
     return;
+}
+
+void exit_signal_handler(int signum)
+{
+    cout << "Signal " << signum << " received." << endl;
+    cout << "Terminating..." << endl;
+    exit(0);
 }
