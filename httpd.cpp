@@ -51,6 +51,7 @@ bool file_exists(string &filepath);
 bool dir_exists(string &filepath);
 void http_response(int conn, respparam &response);
 void url_decode(string &path);
+void child_exit_handler(int signum);
 void exit_signal_handler(int signum);
 
 int main(int argc, char *argv[])
@@ -136,6 +137,7 @@ int server()
 
 
     // Register signal handlers
+    signal(SIGCHLD, child_exit_handler);
     signal(SIGINT, exit_signal_handler);
     signal(SIGTERM, exit_signal_handler);
 
@@ -172,7 +174,7 @@ int server()
         } else {
             close(conn);
             // Remove all dead children
-            while (waitpid(-1, NULL, WNOHANG) != 0) {}
+            while (waitpid(-1, NULL, WNOHANG) > 0) {}
         }
     }
 
@@ -496,6 +498,11 @@ void url_decode(string &path)
     }
 
     return;
+}
+
+void child_exit_handler(int signum)
+{
+    while (waitpid(-1, NULL, WNOHANG) > 0) {}
 }
 
 void exit_signal_handler(int signum)
