@@ -17,6 +17,7 @@
 
 using namespace std;
 
+const string program_name = "Simple HTTP Daemon v0.01. ["__DATE__" "__TIME__"]";
 //const string server_identity = "NPHTTPD/0.01";
 const string server_header = "Server: NPHTTPD/0.01\r\n";
 
@@ -104,6 +105,7 @@ int main(int argc, char *argv[])
         exit(2);
     }
 
+    cout << program_name << endl;
     cout << "HTTPD starting on port " << port << "." << endl;
     cout << "Webroot: " << webroot << endl;
 
@@ -114,7 +116,7 @@ int main(int argc, char *argv[])
 
 void help(char *argv)
 {
-    cout << "Simple HTTP Daemon v0.01." << endl;
+    cout << program_name << endl;
     cout << "Usage: " << argv << " -p [TCP_PORT] -r [WEB_ROOT] -i [DEFAULT_INDEX] -m [MAGIC_DB] -a -l" << endl;
     cout << " -p [TCP_PORT] - TCP port to listen on. Default = 80." << endl;
     cout << " -r [WEB_ROOT] - Directory for web root. Default = current working directory." << endl;
@@ -140,6 +142,7 @@ int server()
     signal(SIGCHLD, child_exit_handler);
     signal(SIGINT, exit_signal_handler);
     signal(SIGTERM, exit_signal_handler);
+    signal(SIGPIPE, SIG_IGN);
 
     // Create server socket
     sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -382,7 +385,7 @@ int worker(int conn, char *client_address)
                     write(conn, "\r\n", 2);
                     while (ftell(file) < filesize) {
                         readbytes = fread(filebuf,1,4096,file);
-                        write(conn, filebuf, readbytes);
+                        if (write(conn, filebuf, readbytes) < 0) { break; }
                     }
 
                 } else {
