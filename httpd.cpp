@@ -15,6 +15,8 @@
 #include <errno.h>
 #include <magic.h>
 
+#define LISTEN_BACKLOG 5
+
 using namespace std;
 
 const string program_name = "Simple HTTP Daemon v0.01. ["__DATE__" "__TIME__"]";
@@ -161,7 +163,7 @@ int server()
         cerr << "Failed to bind to socket! Error: " << error << endl;
         exit(2);
     }
-    listen(sock, 0);
+    listen(sock, LISTEN_BACKLOG);
 
     // Wait for connection and fork
     while (1) {
