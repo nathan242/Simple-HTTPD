@@ -169,6 +169,15 @@ int server()
     while (1) {
         conn = accept(sock, (sockaddr *) &cli_addr, &cli_len);
 
+        if (conn < 0) {
+            if (errno != EINTR) {
+                error = errno;
+                cerr << "Failed to accept connection! Error: " << error << endl;
+            }
+
+            continue;
+        }
+
         pid = fork();
 
         if (pid == 0) {
