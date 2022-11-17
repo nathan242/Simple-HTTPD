@@ -14,14 +14,15 @@
 #include <dirent.h>
 #include <errno.h>
 #include <magic.h>
+#include <map>
 
-#define LISTEN_BACKLOG 5
+#define LISTEN_BACKLOG 10
 
 using namespace std;
 
-const string program_name = "Simple HTTP Daemon v0.01. ["__DATE__" "__TIME__"]";
+const string program_name = "Simple HTTP Daemon v0.0.2 [" __DATE__ " " __TIME__ "]";
 //const string server_identity = "NPHTTPD/0.01";
-const string server_header = "Server: NPHTTPD/0.01\r\n";
+const string server_header = "Server: NPHTTPD/0.0.2\r\n";
 
 // Global variables
 int port = 80;
@@ -30,6 +31,7 @@ string index_page ("index.html");
 string magic_db;
 bool auto_index = false;
 bool logging = false;
+string mime_config;
 
 magic_t magic;
 
@@ -46,6 +48,8 @@ struct respparam {
     string location;
 };
 
+map<string, string> mime_types{{".css", "text/css"}, {".js", "application/javascript"}};
+
 void help(char *argv);
 int server();
 int worker(int conn, char *client_address);
@@ -61,9 +65,13 @@ int main(int argc, char *argv[])
 {
     int opt;
     int status = 0;
+    stringstream mime_config_stream;
+    stringstream mime_config_part;
+    string mime_config_segment;
+    string mime_suffix;
+    string mime_type;
 
-
-    while ((opt = getopt(argc, argv, "halp:r:i:m:")) != -1) {
+    while ((opt = getopt(argc, argv, "halp:r:i:m:t:")) != -1) {
         switch (opt) {
             case 'p':
                 port = atoi(optarg);
@@ -82,6 +90,9 @@ int main(int argc, char *argv[])
                 break;
             case 'l':
                 logging = true;
+                break;
+            case 't':
+                mime_config.assign(optarg);
                 break;
             case 'h':
             default:
@@ -107,6 +118,21 @@ int main(int argc, char *argv[])
         exit(2);
     }
 
+    if (mime_config.length() > 0) {
+        mime_config_stream.str(mime_config);
+
+        while (getline(mime_config_stream, mime_config_segment, ',')) {
+            mime_config_part.clear();
+            mime_config_part.str(mime_config_segment);
+            if (!getline(mime_config_part, mime_suffix, ':') || !getline(mime_config_part, mime_type, ':')) {
+                cerr << "Failed to parse mime config string!" << endl;
+                exit(2);
+            }
+
+            mime_types[mime_suffix] = mime_type;
+        }
+    }
+
     cout << program_name << endl;
     cout << "HTTPD starting on port " << port << "." << endl;
     cout << "Webroot: " << webroot << endl;
@@ -119,11 +145,12 @@ int main(int argc, char *argv[])
 void help(char *argv)
 {
     cout << program_name << endl;
-    cout << "Usage: " << argv << " -p [TCP_PORT] -r [WEB_ROOT] -i [DEFAULT_INDEX] -m [MAGIC_DB] -a -l" << endl;
+    cout << "Usage: " << argv << " -p [TCP_PORT] -r [WEB_ROOT] -i [DEFAULT_INDEX] -m [MAGIC_DB] -t [MIME_CONFIG] -a -l" << endl;
     cout << " -p [TCP_PORT] - TCP port to listen on. Default = 80." << endl;
     cout << " -r [WEB_ROOT] - Directory for web root. Default = current working directory." << endl;
     cout << " -i [DEFAULT_INDEX] - Default index file. Default = \"index.html\"." << endl;
     cout << " -m [MAGIC_DB] - Path to alternate magic database." << endl;
+    cout << " -t [MIME_CONFIG] - Comma seperated mime type config (<suffix>:<type>,<suffix><type>)." << endl;
     cout << " -a - Use automatic directory index when default index is missing." << endl;
     cout << " -l - Enable logging to STDOUT." << endl;
 }
@@ -138,7 +165,6 @@ int server()
     pid_t pid;
     struct sockaddr_in serv_addr, cli_addr;
     socklen_t cli_len = sizeof(cli_addr);
-
 
     // Register signal handlers
     signal(SIGCHLD, child_exit_handler);
@@ -208,6 +234,8 @@ int worker(int conn, char *client_address)
     respparam response;
 
     string filepath;
+    size_t filepathsz;
+    size_t filepathsuffixsz;
     FILE *file;
     long filesize;
     string filesizestr;
@@ -224,7 +252,6 @@ int worker(int conn, char *client_address)
     string file_mime;
 
     string redirect_path;
-
 
     // Clear receive buffer
     memset(recvbuf, 0, 4096);
@@ -370,8 +397,21 @@ int worker(int conn, char *client_address)
             if (auto_index_page.length() == 0) {
                 // Try to open file
                 if (file_exists(filepath) && (file = fopen(filepath.c_str(), "r"))) {
-                    // Get file magic
-                    file_mime = magic_file(magic, filepath.c_str());
+                    // Get file mime
+                    for (map<string, string>::iterator iter = mime_types.begin(); iter != mime_types.end(); ++iter) {
+                        filepathsz = filepath.size();
+                        filepathsuffixsz = iter->first.size();
+
+                        if (filepathsz >= filepathsuffixsz && filepath.compare(filepathsz - filepathsuffixsz, filepathsuffixsz, iter->first) == 0) {
+                            file_mime = iter->second;
+                            break;
+                        }
+                    }
+
+                    if (file_mime.empty()) {
+                        file_mime = magic_file(magic, filepath.c_str());
+                    }
+
                     intconv.str("");
                     intconv << "Content-Type: ";
                     if (file_mime.length() > 0) {
